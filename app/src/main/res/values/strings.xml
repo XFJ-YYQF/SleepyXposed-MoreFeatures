@@ -88,5 +88,6 @@
     <string name="mihome_section_title">Mi Home Device Status Reporting</string>
     <string name="mihome_section_description">Sign in with your Xiaomi cloud account and poll
         device status (temperature/humidity, presence, switches) on a timer, each reported as its
-        own device. Does not hook the Mi Home app itself.</string>
+        own device. Fetch your device and property list directly instead of looking up
+        did/siid/piid by hand.</string>
 </resources>

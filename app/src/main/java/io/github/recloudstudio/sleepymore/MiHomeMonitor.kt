@@ -12,11 +12,11 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * How a MIoT property value should be interpreted and rendered as Sleepy status text.
+ * How a MIoT property value should be interpreted and rendered as text.
  *
  * Deliberately just 3 generic kinds instead of enumerating sensor categories (temperature,
  * PM2.5, CO2, presence, switch, ...) — new sensor types are handled by configuring a
- * [MiHomeDeviceMapping] instance, never by touching this code.
+ * [MiHomePropertySource] instance, never by touching this code.
  */
 enum class MiHomeValueType {
     /** on/off, presence, contact, leak, etc. Value is Boolean (or a 0/1 number). */
@@ -28,18 +28,15 @@ enum class MiHomeValueType {
 }
 
 /**
- * A single device mapping: which cloud device (did[/siid/piid]) maps to which Sleepy status
- * entry (deviceId/showName), and how to render the value. All formatting is data, not code —
- * covering a new sensor kind means adding a mapping with the right [unit]/[decimals], not adding
- * a case to [MiHomeMonitor.renderValue].
+ * One MIoT property to read. All formatting is data, not code — covering a new sensor kind
+ * means adding a source with the right [unit]/[decimals], not adding a case to
+ * [MiHomeMonitor.renderValue].
  */
-data class MiHomeDeviceMapping(
+data class MiHomePropertySource(
         val did: String,
         val siid: Int? = null,
         val piid: Int? = null,
-        val valueType: MiHomeValueType = MiHomeValueType.STRING,
-        val deviceId: String,
-        val showName: String,
+        val valueType: MiHomeValueType = MiHomeValueType.NUMBER,
         // --- BOOLEAN formatting ---
         val trueText: String = "开启",
         val falseText: String = "关闭",
@@ -47,9 +44,7 @@ data class MiHomeDeviceMapping(
          * "no_motion"/"closed" style inverted booleans. */
         val invertBoolean: Boolean = false,
         // --- NUMBER formatting: displayed as (raw * multiplier + offset), rounded to `decimals`,
-        // followed by `unit`. Defaults (1.0 / 0.0) mean "show the raw value as-is". Some MIoT
-        // props report values pre-scaled (e.g. humidity*10) — multiplier/offset cover that
-        // without needing a special case per sensor kind. ---
+        // followed by `unit`. Defaults (1.0 / 0.0) mean "show the raw value as-is". ---
         val unit: String = "",
         val decimals: Int = 1,
         val multiplier: Double = 1.0,
@@ -58,9 +53,22 @@ data class MiHomeDeviceMapping(
 )
 
 /**
- * Polls Xiaomi cloud for configured device states and reports each one to the Sleepy server as
- * its own "device", reusing [SleepyApiClient.sendDeviceStatus]. Runs entirely in the SleepyXposed
- * app's own process — no Xposed hook into 米家 involved.
+ * One reported Sleepy "device". Combines 1..N [MiHomePropertySource]s through [template], where
+ * `{#1}`, `{#2}`, ... refer to sources by position (1-based). For the common single-sensor case
+ * `template` is just `"{#1}"` — the raw formatted value, no extra text.
+ */
+data class MiHomeReportItem(
+        val deviceId: String,
+        val showName: String,
+        val template: String = "{#1}",
+        val sources: List<MiHomePropertySource>
+)
+
+/**
+ * Polls Xiaomi cloud for configured device properties and reports each configured
+ * [MiHomeReportItem] to the Sleepy server as its own "device", reusing
+ * [SleepyApiClient.sendDeviceStatus]. Runs entirely in the SleepyXposed app's own process — no
+ * Xposed hook into 米家 involved.
  */
 class MiHomeMonitor(private val context: Context) {
     private val TAG = "SleepyXposed-MiHome"
@@ -125,42 +133,41 @@ class MiHomeMonitor(private val context: Context) {
     }
 
     private fun pollOnce(cloud: MiHomeCloudClient, config: SleepyConfig) {
-        val mappings = parseMappings(config.miHomeDevicesJson)
-        if (mappings.isEmpty()) return
+        val items = parseReportItems(config.miHomeDevicesJson)
+        if (items.isEmpty()) return
 
         val devices = cloud.fetchDeviceList().associateBy { it.did }
 
-        for (m in mappings) {
-            val device = devices[m.did]
-            val online = device?.isOnline ?: false
+        for (item in items) {
+            if (item.sources.isEmpty()) continue
 
-            val statusText: String
-            val using: Boolean
+            val rendered =
+                    item.sources.map { src ->
+                        val online = devices[src.did]?.isOnline ?: false
+                        if (!online) {
+                            false to src.offlineText
+                        } else if (src.siid != null && src.piid != null) {
+                            renderValue(src, cloud.getProp(src.did, src.siid, src.piid))
+                        } else {
+                            true to "在线"
+                        }
+                    }
 
-            if (!online) {
-                statusText = m.offlineText
-                using = false
-            } else if (m.siid != null && m.piid != null) {
-                val value = cloud.getProp(m.did, m.siid, m.piid)
-                val rendered = renderValue(m, value)
-                using = rendered.first
-                statusText = rendered.second
-            } else {
-                using = true
-                statusText = "在线"
-            }
+            var text = item.template
+            rendered.forEachIndexed { idx, (_, str) -> text = text.replace("{#${idx + 1}}", str) }
+            val using = rendered.any { it.first }
 
             SleepyApiClient.sendDeviceStatus(
                     baseUrl = config.serverUrl,
                     secret = config.secret,
-                    id = m.deviceId,
-                    showName = m.showName,
+                    id = item.deviceId,
+                    showName = item.showName,
                     using = using,
-                    status = statusText,
+                    status = text,
                     callback =
                             object : Callback {
                                 override fun onFailure(call: Call, e: IOException) {
-                                    Log.w(TAG, "report ${m.deviceId} failed: ${e.message}")
+                                    Log.w(TAG, "report ${item.deviceId} failed: ${e.message}")
                                 }
                                 override fun onResponse(call: Call, response: Response) {
                                     response.close()
@@ -170,58 +177,75 @@ class MiHomeMonitor(private val context: Context) {
         }
     }
 
-    /** Returns (using, statusText) for a raw MIoT property value, per the mapping's [MiHomeValueType]. */
-    private fun renderValue(m: MiHomeDeviceMapping, value: Any?): Pair<Boolean, String> {
-        if (value == null) return false to m.offlineText
-        return when (m.valueType) {
+    /** Returns (using, text) for a raw MIoT property value, per the source's [MiHomeValueType]. */
+    private fun renderValue(src: MiHomePropertySource, value: Any?): Pair<Boolean, String> {
+        if (value == null) return false to src.offlineText
+        return when (src.valueType) {
             MiHomeValueType.BOOLEAN -> {
                 val raw = value as? Boolean ?: (((value as? Number)?.toDouble() ?: 0.0) != 0.0)
-                val b = if (m.invertBoolean) !raw else raw
-                b to (if (b) m.trueText else m.falseText)
+                val b = if (src.invertBoolean) !raw else raw
+                b to (if (b) src.trueText else src.falseText)
             }
             MiHomeValueType.NUMBER -> {
                 val n = (value as? Number)?.toDouble() ?: return true to value.toString()
-                val adjusted = n * m.multiplier + m.offset
-                true to ("%.${m.decimals.coerceIn(0, 6)}f%s".format(adjusted, m.unit))
+                val adjusted = n * src.multiplier + src.offset
+                true to ("%.${src.decimals.coerceIn(0, 6)}f%s".format(adjusted, src.unit))
             }
             MiHomeValueType.STRING -> true to value.toString()
         }
     }
 
-    private fun parseMappings(json: String): List<MiHomeDeviceMapping> {
-        return try {
-            val arr = JSONArray(json)
-            (0 until arr.length()).mapNotNull { i ->
-                val o: JSONObject = arr.optJSONObject(i) ?: return@mapNotNull null
-                val did = o.optString("did").takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                val deviceId =
-                        o.optString("deviceId").takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                val valueType =
-                        try {
-                            MiHomeValueType.valueOf(o.optString("valueType", "STRING").uppercase())
-                        } catch (_: Exception) {
-                            MiHomeValueType.STRING
-                        }
-                MiHomeDeviceMapping(
-                        did = did,
-                        siid = if (o.has("siid")) o.optInt("siid") else null,
-                        piid = if (o.has("piid")) o.optInt("piid") else null,
-                        valueType = valueType,
-                        deviceId = deviceId,
-                        showName = o.optString("showName", deviceId),
-                        trueText = o.optString("trueText", "开启"),
-                        falseText = o.optString("falseText", "关闭"),
-                        invertBoolean = o.optBoolean("invertBoolean", false),
-                        unit = o.optString("unit", ""),
-                        decimals = o.optInt("decimals", 1),
-                        multiplier = o.optDouble("multiplier", 1.0),
-                        offset = o.optDouble("offset", 0.0),
-                        offlineText = o.optString("offlineText", "离线")
-                )
+    companion object {
+        fun parseReportItems(json: String): List<MiHomeReportItem> {
+            return try {
+                val arr = JSONArray(json)
+                (0 until arr.length()).mapNotNull { i ->
+                    val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                    val deviceId =
+                            o.optString("deviceId").takeIf { it.isNotBlank() }
+                                    ?: return@mapNotNull null
+                    val sourcesArr = o.optJSONArray("sources") ?: JSONArray()
+                    val sources =
+                            (0 until sourcesArr.length()).mapNotNull { si ->
+                                parseSource(sourcesArr.optJSONObject(si))
+                            }
+                    if (sources.isEmpty()) return@mapNotNull null
+                    MiHomeReportItem(
+                            deviceId = deviceId,
+                            showName = o.optString("showName", deviceId),
+                            template = o.optString("template", "{#1}"),
+                            sources = sources
+                    )
+                }
+            } catch (e: Exception) {
+                Log.w("SleepyXposed-MiHome", "invalid mihome_devices JSON: ${e.message}")
+                emptyList()
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "invalid mihome_devices JSON: ${e.message}")
-            emptyList()
+        }
+
+        private fun parseSource(o: JSONObject?): MiHomePropertySource? {
+            if (o == null) return null
+            val did = o.optString("did").takeIf { it.isNotBlank() } ?: return null
+            val valueType =
+                    try {
+                        MiHomeValueType.valueOf(o.optString("valueType", "NUMBER").uppercase())
+                    } catch (_: Exception) {
+                        MiHomeValueType.NUMBER
+                    }
+            return MiHomePropertySource(
+                    did = did,
+                    siid = if (o.has("siid")) o.optInt("siid") else null,
+                    piid = if (o.has("piid")) o.optInt("piid") else null,
+                    valueType = valueType,
+                    trueText = o.optString("trueText", "开启"),
+                    falseText = o.optString("falseText", "关闭"),
+                    invertBoolean = o.optBoolean("invertBoolean", false),
+                    unit = o.optString("unit", ""),
+                    decimals = o.optInt("decimals", 1),
+                    multiplier = o.optDouble("multiplier", 1.0),
+                    offset = o.optDouble("offset", 0.0),
+                    offlineText = o.optString("offlineText", "离线")
+            )
         }
     }
 }

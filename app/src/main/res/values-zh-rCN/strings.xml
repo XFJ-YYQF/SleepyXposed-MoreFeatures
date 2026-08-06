@@ -79,5 +79,5 @@
 
   <!-- 米家云设备状态上报 -->
   <string name="mihome_section_title">米家设备状态上报</string>
-  <string name="mihome_section_description">登录小米云账号，定时轮询设备状态（温湿度、人体存在、开关等）并作为独立设备上报。不会以任何方式 hook 米家 App 本身。</string>
+  <string name="mihome_section_description">登录小米云账号，定时轮询设备状态（温湿度、人体存在、开关等）并作为独立设备上报。可以直接拉取设备列表和属性列表来选，不用自己去查 did/siid/piid。</string>
 </resources>

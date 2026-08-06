@@ -32,6 +32,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -50,8 +51,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.recloudstudio.sleepymore.ConfigManager
 import io.github.recloudstudio.sleepymore.MediaMethod
+import io.github.recloudstudio.sleepymore.MiHomeCloudClient
+import io.github.recloudstudio.sleepymore.MiHomeDevice
 import io.github.recloudstudio.sleepymore.MiHomeMonitorService
 import io.github.recloudstudio.sleepymore.MiHomeValueType
+import io.github.recloudstudio.sleepymore.MiotSpecClient
+import io.github.recloudstudio.sleepymore.MiotSpecProperty
 import io.github.recloudstudio.sleepymore.R
 import io.github.recloudstudio.sleepymore.RomDetector
 import io.github.recloudstudio.sleepymore.SleepyConfig
@@ -84,9 +89,16 @@ fun ConfigScreen() {
     var miHomePassword by rememberSaveable { mutableStateOf("") }
     var miHomeRegion by rememberSaveable { mutableStateOf("cn") }
     var miHomePollIntervalSec by rememberSaveable { mutableStateOf("120") }
-    // Row list isn't rememberSaveable (would need a custom Saver) — it reloads from the saved
-    // JSON whenever this screen re-enters composition, same as everything gated by `initialized`.
-    val miHomeRows = remember { mutableStateListOf<MiHomeRowState>() }
+    // Neither of these is rememberSaveable (would need a custom Saver) — they reload/reset
+    // whenever this screen re-enters composition, same as everything gated by `initialized`.
+    val miHomeItems = remember { mutableStateListOf<MiHomeItemState>() }
+    // Devices fetched once from the account, shared by every source's device-picker so we don't
+    // log in again per row. Cleared implicitly on screen re-entry — that's fine, it's just a cache.
+    val miHomeFetchedDevices = remember { mutableStateListOf<MiHomeDevice>() }
+    var miHomeFetchStatus by remember { mutableStateOf<String?>(null) }
+    var miHomeFetchInProgress by remember { mutableStateOf(false) }
+    // model -> its readable MIoT properties, fetched lazily per source's property-picker.
+    val miHomePropertyCache = remember { mutableStateMapOf<String, List<MiotSpecProperty>>() }
     var statusMessage by rememberSaveable { mutableStateOf<String?>(null) }
     var initialized by rememberSaveable { mutableStateOf(false) }
 
@@ -111,8 +123,8 @@ fun ConfigScreen() {
         miHomePassword = loaded.miHomePassword
         miHomeRegion = loaded.miHomeRegion.ifBlank { "cn" }
         miHomePollIntervalSec = loaded.miHomePollIntervalSec.toString()
-        miHomeRows.clear()
-        miHomeRows.addAll(parseMiHomeRows(loaded.miHomeDevicesJson))
+        miHomeItems.clear()
+        miHomeItems.addAll(parseMiHomeItemsUI(loaded.miHomeDevicesJson))
         initialized = true
     }
 
@@ -339,29 +351,86 @@ fun ConfigScreen() {
                 )
             }
 
+            OutlinedButton(
+                onClick = {
+                    if (miHomeUsername.isBlank() || miHomePassword.isBlank()) {
+                        Toast.makeText(context, "请先填写账号和密码", Toast.LENGTH_SHORT).show()
+                        return@OutlinedButton
+                    }
+                    miHomeFetchInProgress = true
+                    miHomeFetchStatus = "正在登录并获取设备列表…"
+                    scope.launch {
+                        val devices =
+                            withContext(Dispatchers.IO) {
+                                runCatching {
+                                        val cloud =
+                                            MiHomeCloudClient(
+                                                miHomeUsername.trim(),
+                                                miHomePassword,
+                                                miHomeRegion.trim().ifBlank { "cn" }
+                                            )
+                                        if (!cloud.login()) return@runCatching null
+                                        cloud.fetchDeviceList()
+                                    }
+                                    .getOrNull()
+                            }
+                        miHomeFetchInProgress = false
+                        if (devices == null) {
+                            miHomeFetchStatus = "登录失败，请检查账号/密码/区域"
+                        } else {
+                            miHomeFetchedDevices.clear()
+                            miHomeFetchedDevices.addAll(devices)
+                            miHomeFetchStatus = "已获取 ${devices.size} 个设备，下面每条属性来源里可以直接选了"
+                        }
+                    }
+                },
+                enabled = !miHomeFetchInProgress,
+                modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp)
+            ) {
+                Text(if (miHomeFetchInProgress) "获取中…" else "拉取米家设备列表")
+            }
+            if (miHomeFetchStatus != null) {
+                Text(
+                    text = miHomeFetchStatus!!,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+            }
+
             Spacer(Modifier.height(4.dp))
             HorizontalDivider()
             Spacer(Modifier.height(8.dp))
             Text(
-                text = "设备映射",
+                text = "上报项",
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.padding(bottom = 4.dp)
             )
             Text(
-                text = "did 从米家 App 或设备列表接口获取；siid/piid 去 miot-spec.org 按你的设备型号查（留空则只上报在线/离线）。",
+                text = "每个上报项对应 Sleepy 里的一台“设备”。先点上面的按钮拉设备列表，再在属性来源里选设备、选属性——不用自己去查 did/siid/piid。一个上报项可以加多条属性来源，用自定义文本模板拼在一起，比如“房间状态：温度{#1} 湿度{#2}”。",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.padding(bottom = 8.dp)
             )
 
-            miHomeRows.forEachIndexed { index, row -> MiHomeRowEditor(row) { miHomeRows.removeAt(index) } }
+            miHomeItems.forEachIndexed { index, item ->
+                MiHomeItemEditor(
+                    item = item,
+                    fetchedDevices = miHomeFetchedDevices,
+                    propertyCache = miHomePropertyCache,
+                    scope = scope,
+                    onDelete = { miHomeItems.removeAt(index) }
+                )
+            }
 
             OutlinedButton(
-                onClick = { miHomeRows.add(MiHomeRowState()) },
+                onClick = {
+                    miHomeItems.add(MiHomeItemState().apply { sources.add(MiHomeSourceState()) })
+                },
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text("+ 添加设备")
+                Text("+ 添加上报项")
             }
         }
 
@@ -410,7 +479,7 @@ fun ConfigScreen() {
                         miHomePassword = miHomePassword,
                         miHomeRegion = miHomeRegion.trim().ifBlank { "cn" },
                         miHomePollIntervalSec = miHomePollIntervalSec.toIntOrNull()?.coerceAtLeast(30) ?: 120,
-                        miHomeDevicesJson = serializeMiHomeRows(miHomeRows)
+                        miHomeDevicesJson = serializeMiHomeItemsUI(miHomeItems)
                     )
                 scope.launch {
                     val saved = withContext(Dispatchers.IO) { ConfigManager.saveConfig(context, config) }
@@ -533,14 +602,13 @@ private fun SwitchRow(title: String, checked: Boolean, onCheckedChange: (Boolean
     }
 }
 
-/** Compose-observable editable row backing one device mapping in the UI. */
-private class MiHomeRowState(
+/** Compose-observable editable single MIoT property source within a [MiHomeItemState]. */
+private class MiHomeSourceState(
     did: String = "",
+    model: String = "",
     valueType: MiHomeValueType = MiHomeValueType.NUMBER,
     siid: String = "",
     piid: String = "",
-    deviceId: String = "",
-    showName: String = "",
     trueText: String = "开启",
     falseText: String = "关闭",
     invertBoolean: Boolean = false,
@@ -550,11 +618,12 @@ private class MiHomeRowState(
     offset: String = "0"
 ) {
     var did by mutableStateOf(did)
+    /** Device model string (e.g. "cgllc.airm.cgdn1"), captured from the device picker — needed to
+     * look up its property list. Blank if `did` was typed by hand instead of picked. */
+    var model by mutableStateOf(model)
     var valueType by mutableStateOf(valueType)
     var siid by mutableStateOf(siid)
     var piid by mutableStateOf(piid)
-    var deviceId by mutableStateOf(deviceId)
-    var showName by mutableStateOf(showName)
     var trueText by mutableStateOf(trueText)
     var falseText by mutableStateOf(falseText)
     var invertBoolean by mutableStateOf(invertBoolean)
@@ -562,6 +631,20 @@ private class MiHomeRowState(
     var decimals by mutableStateOf(decimals)
     var multiplier by mutableStateOf(multiplier)
     var offset by mutableStateOf(offset)
+    var showDevicePicker by mutableStateOf(false)
+    var showPropertyPicker by mutableStateOf(false)
+}
+
+/** Compose-observable editable "report item" — one Sleepy device fed by 1..N property sources. */
+private class MiHomeItemState(
+    deviceId: String = "",
+    showName: String = "",
+    template: String = "{#1}"
+) {
+    var deviceId by mutableStateOf(deviceId)
+    var showName by mutableStateOf(showName)
+    var template by mutableStateOf(template)
+    val sources = mutableStateListOf<MiHomeSourceState>()
 }
 
 private val MI_HOME_VALUE_TYPE_LABELS =
@@ -573,8 +656,8 @@ private val MI_HOME_VALUE_TYPE_LABELS =
 
 /**
  * Optional quick-fill presets — purely a UI convenience that pre-populates the generic
- * [MiHomeRowState] fields (unit/decimals/valueType/...). Adding a new sensor kind means adding a
- * row here (or just typing values directly into the form); it never requires touching
+ * [MiHomeSourceState] fields (unit/decimals/valueType/...). Adding a new sensor kind means adding
+ * a preset here (or just typing values directly into the form); it never requires touching
  * [MiHomeMonitor]'s rendering logic.
  */
 private data class MiHomePreset(
@@ -601,21 +684,101 @@ private val MI_HOME_PRESETS =
     )
 
 @Composable
-private fun MiHomeRowEditor(row: MiHomeRowState, onDelete: () -> Unit) {
+private fun MiHomeItemEditor(
+    item: MiHomeItemState,
+    fetchedDevices: List<MiHomeDevice>,
+    propertyCache: MutableMap<String, List<MiotSpecProperty>>,
+    scope: kotlinx.coroutines.CoroutineScope,
+    onDelete: () -> Unit
+) {
     Card(
-        modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
+        modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = row.showName.ifBlank { "新设备" },
+                    text = item.showName.ifBlank { "新上报项" },
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.weight(1f)
                 )
-                TextButton(onClick = onDelete) { Text("删除") }
+                TextButton(onClick = onDelete) { Text("删除上报项") }
+            }
+
+            Field(value = item.deviceId, onValueChange = { item.deviceId = it }, label = "Sleepy 设备 ID")
+            Field(value = item.showName, onValueChange = { item.showName = it }, label = "Sleepy 显示名称")
+
+            item.sources.forEachIndexed { index, src ->
+                MiHomeSourceEditor(
+                    source = src,
+                    index = index,
+                    fetchedDevices = fetchedDevices,
+                    propertyCache = propertyCache,
+                    scope = scope,
+                    canDelete = item.sources.size > 1,
+                    onDelete = { item.sources.removeAt(index) }
+                )
+            }
+
+            OutlinedButton(
+                onClick = {
+                    item.sources.add(MiHomeSourceState())
+                    // Give the template a sensible starting point once there's more than one
+                    // source to combine — the user only needs to add wording around the
+                    // placeholders, not learn the {#N} syntax from scratch.
+                    if (item.sources.size > 1 && item.template == "{#1}") {
+                        item.template = (1..item.sources.size).joinToString(" ") { "{#$it}" }
+                    }
+                },
+                modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 8.dp)
+            ) {
+                Text("+ 添加属性来源")
+            }
+
+            if (item.sources.size > 1) {
+                HorizontalDivider(modifier = Modifier.padding(bottom = 8.dp))
+                Text(
+                    text = "文本模板 — 可用占位符：" + (1..item.sources.size).joinToString(" ") { "{#$it}" },
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.padding(bottom = 4.dp)
+                )
+                Field(
+                    value = item.template,
+                    onValueChange = { item.template = it },
+                    label = "例如：房间状态：温度{#1} 湿度{#2}"
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun MiHomeSourceEditor(
+    source: MiHomeSourceState,
+    index: Int,
+    fetchedDevices: List<MiHomeDevice>,
+    propertyCache: MutableMap<String, List<MiotSpecProperty>>,
+    scope: kotlinx.coroutines.CoroutineScope,
+    canDelete: Boolean,
+    onDelete: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+    ) {
+        Column(modifier = Modifier.padding(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "属性来源 #${index + 1}",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f)
+                )
+                if (canDelete) TextButton(onClick = onDelete) { Text("删除") }
             }
 
             Text(
@@ -629,12 +792,11 @@ private fun MiHomeRowEditor(row: MiHomeRowState, onDelete: () -> Unit) {
                     FilterChip(
                         selected = false,
                         onClick = {
-                            row.valueType = preset.valueType
-                            row.unit = preset.unit
-                            row.decimals = preset.decimals
-                            row.trueText = preset.trueText
-                            row.falseText = preset.falseText
-                            if (row.showName.isBlank()) row.showName = preset.label
+                            source.valueType = preset.valueType
+                            source.unit = preset.unit
+                            source.decimals = preset.decimals
+                            source.trueText = preset.trueText
+                            source.falseText = preset.falseText
                         },
                         label = { Text(preset.label, style = MaterialTheme.typography.labelSmall) },
                         modifier = Modifier.padding(end = 6.dp)
@@ -642,76 +804,181 @@ private fun MiHomeRowEditor(row: MiHomeRowState, onDelete: () -> Unit) {
                 }
             }
 
-            // Value type selector — the 3 generic kinds actually understood by MiHomeMonitor.
-            Row(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
-                MiHomeValueType.entries.forEach { t ->
-                    FilterChip(
-                        selected = row.valueType == t,
-                        onClick = { row.valueType = t },
-                        label = { Text(MI_HOME_VALUE_TYPE_LABELS[t] ?: t.name, style = MaterialTheme.typography.labelSmall) },
-                        modifier = Modifier.padding(end = 6.dp)
-                    )
+            // --- Device picker: replaces manually typing `did` with tapping a fetched device. ---
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = if (source.did.isBlank()) "尚未选择设备" else "设备：${source.did}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f)
+                )
+                TextButton(
+                    onClick = { source.showDevicePicker = !source.showDevicePicker },
+                    enabled = fetchedDevices.isNotEmpty()
+                ) {
+                    Text(if (fetchedDevices.isEmpty()) "先拉取设备列表" else "选设备")
                 }
             }
+            if (source.showDevicePicker && fetchedDevices.isNotEmpty()) {
+                Row(modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp)) {
+                    fetchedDevices.forEach { device ->
+                        FilterChip(
+                            selected = source.did == device.did,
+                            onClick = {
+                                source.did = device.did
+                                source.model = device.model
+                                source.showDevicePicker = false
+                            },
+                            label = {
+                                Text(
+                                    "${device.name.ifBlank { device.did }} (${device.model})",
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            },
+                            modifier = Modifier.padding(end = 6.dp, bottom = 6.dp)
+                        )
+                    }
+                }
+            }
+            Field(value = source.did, onValueChange = { source.did = it; source.model = "" }, label = "设备 did（也可手动填）")
 
-            Field(value = row.did, onValueChange = { row.did = it }, label = "设备 did")
-
+            // --- Property picker: replaces manually typing siid/piid. Needs a known `model`,
+            // which only the device picker above sets — hand-typed did's don't have one. ---
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text =
+                        if (source.siid.isNotBlank() && source.piid.isNotBlank())
+                            "属性：siid=${source.siid} piid=${source.piid}"
+                        else "尚未选择属性（留空=仅上报在线/离线）",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f)
+                )
+                TextButton(
+                    onClick = {
+                        val model = source.model
+                        if (model.isBlank()) return@TextButton
+                        source.showPropertyPicker = !source.showPropertyPicker
+                        if (source.showPropertyPicker && propertyCache[model] == null) {
+                            scope.launch {
+                                val props =
+                                    withContext(Dispatchers.IO) {
+                                        runCatching { MiotSpecClient.fetchProperties(model) }
+                                            .getOrDefault(emptyList())
+                                    }
+                                propertyCache[model] = props
+                            }
+                        }
+                    },
+                    enabled = source.model.isNotBlank()
+                ) {
+                    Text(if (source.model.isBlank()) "需先选设备" else "选属性")
+                }
+            }
+            if (source.showPropertyPicker && source.model.isNotBlank()) {
+                val props = propertyCache[source.model]
+                when {
+                    props == null ->
+                        Text(
+                            "正在获取属性列表…",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.padding(bottom = 4.dp)
+                        )
+                    props.isEmpty() ->
+                        Text(
+                            "该型号未在公开规格库中找到可读属性，请手动填 siid/piid。",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.padding(bottom = 4.dp)
+                        )
+                    else ->
+                        Row(modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp)) {
+                            props.forEach { prop ->
+                                FilterChip(
+                                    selected = source.siid == prop.siid.toString() && source.piid == prop.piid.toString(),
+                                    onClick = {
+                                        source.siid = prop.siid.toString()
+                                        source.piid = prop.piid.toString()
+                                        source.valueType = prop.guessValueType()
+                                        if (prop.unit.isNotBlank()) source.unit = prop.unit
+                                        source.showPropertyPicker = false
+                                    },
+                                    label = {
+                                        Text(
+                                            "${prop.label} (${prop.siid}.${prop.piid})",
+                                            style = MaterialTheme.typography.labelSmall
+                                        )
+                                    },
+                                    modifier = Modifier.padding(end = 6.dp, bottom = 6.dp)
+                                )
+                            }
+                        }
+                }
+            }
             Row(modifier = Modifier.fillMaxWidth()) {
                 Field(
-                    value = row.siid,
-                    onValueChange = { row.siid = it.filter(Char::isDigit) },
-                    label = "siid（留空=仅在线状态）",
+                    value = source.siid,
+                    onValueChange = { source.siid = it.filter(Char::isDigit) },
+                    label = "siid（也可手动填）",
                     keyboardType = KeyboardType.Number,
                     modifier = Modifier.weight(1f)
                 )
                 Spacer(Modifier.width(10.dp))
                 Field(
-                    value = row.piid,
-                    onValueChange = { row.piid = it.filter(Char::isDigit) },
+                    value = source.piid,
+                    onValueChange = { source.piid = it.filter(Char::isDigit) },
                     label = "piid",
                     keyboardType = KeyboardType.Number,
                     modifier = Modifier.weight(1f)
                 )
             }
 
-            Field(value = row.deviceId, onValueChange = { row.deviceId = it }, label = "Sleepy 设备 ID")
-            Field(value = row.showName, onValueChange = { row.showName = it }, label = "Sleepy 显示名称")
+            // Value type selector — the 3 generic kinds actually understood by MiHomeMonitor.
+            Row(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+                MiHomeValueType.entries.forEach { t ->
+                    FilterChip(
+                        selected = source.valueType == t,
+                        onClick = { source.valueType = t },
+                        label = { Text(MI_HOME_VALUE_TYPE_LABELS[t] ?: t.name, style = MaterialTheme.typography.labelSmall) },
+                        modifier = Modifier.padding(end = 6.dp)
+                    )
+                }
+            }
 
-            when (row.valueType) {
+            when (source.valueType) {
                 MiHomeValueType.BOOLEAN -> {
                     Row(modifier = Modifier.fillMaxWidth()) {
                         Field(
-                            value = row.trueText,
-                            onValueChange = { row.trueText = it },
+                            value = source.trueText,
+                            onValueChange = { source.trueText = it },
                             label = "为真时显示文本",
                             modifier = Modifier.weight(1f)
                         )
                         Spacer(Modifier.width(10.dp))
                         Field(
-                            value = row.falseText,
-                            onValueChange = { row.falseText = it },
+                            value = source.falseText,
+                            onValueChange = { source.falseText = it },
                             label = "为假时显示文本",
                             modifier = Modifier.weight(1f)
                         )
                     }
                     SwitchRow(
                         title = "反转真假值（部分属性语义相反，如“无人/关闭触发”）",
-                        checked = row.invertBoolean,
-                        onCheckedChange = { row.invertBoolean = it }
+                        checked = source.invertBoolean,
+                        onCheckedChange = { source.invertBoolean = it }
                     )
                 }
                 MiHomeValueType.NUMBER -> {
                     Row(modifier = Modifier.fillMaxWidth()) {
                         Field(
-                            value = row.unit,
-                            onValueChange = { row.unit = it },
+                            value = source.unit,
+                            onValueChange = { source.unit = it },
                             label = "单位（如 °C / ppm / μg/m³）",
                             modifier = Modifier.weight(1f)
                         )
                         Spacer(Modifier.width(10.dp))
                         Field(
-                            value = row.decimals,
-                            onValueChange = { row.decimals = it.filter(Char::isDigit) },
+                            value = source.decimals,
+                            onValueChange = { source.decimals = it.filter(Char::isDigit) },
                             label = "小数位数",
                             keyboardType = KeyboardType.Number,
                             modifier = Modifier.weight(1f)
@@ -725,16 +992,16 @@ private fun MiHomeRowEditor(row: MiHomeRowState, onDelete: () -> Unit) {
                     )
                     Row(modifier = Modifier.fillMaxWidth()) {
                         Field(
-                            value = row.multiplier,
-                            onValueChange = { row.multiplier = it },
+                            value = source.multiplier,
+                            onValueChange = { source.multiplier = it },
                             label = "倍率",
                             keyboardType = KeyboardType.Decimal,
                             modifier = Modifier.weight(1f)
                         )
                         Spacer(Modifier.width(10.dp))
                         Field(
-                            value = row.offset,
-                            onValueChange = { row.offset = it },
+                            value = source.offset,
+                            onValueChange = { source.offset = it },
                             label = "偏移",
                             keyboardType = KeyboardType.Decimal,
                             modifier = Modifier.weight(1f)
@@ -749,57 +1016,80 @@ private fun MiHomeRowEditor(row: MiHomeRowState, onDelete: () -> Unit) {
     }
 }
 
-private fun parseMiHomeRows(json: String): List<MiHomeRowState> {
+private fun parseMiHomeItemsUI(json: String): List<MiHomeItemState> {
     return try {
         val arr = JSONArray(json)
         (0 until arr.length()).mapNotNull { i ->
             val o = arr.optJSONObject(i) ?: return@mapNotNull null
-            val valueType =
-                try {
-                    MiHomeValueType.valueOf(o.optString("valueType", "NUMBER").uppercase())
-                } catch (_: Exception) {
-                    MiHomeValueType.NUMBER
-                }
-            MiHomeRowState(
-                did = o.optString("did"),
-                valueType = valueType,
-                siid = if (o.has("siid")) o.optInt("siid").toString() else "",
-                piid = if (o.has("piid")) o.optInt("piid").toString() else "",
-                deviceId = o.optString("deviceId"),
-                showName = o.optString("showName"),
-                trueText = o.optString("trueText", "开启"),
-                falseText = o.optString("falseText", "关闭"),
-                invertBoolean = o.optBoolean("invertBoolean", false),
-                unit = o.optString("unit", ""),
-                decimals = if (o.has("decimals")) o.optInt("decimals").toString() else "1",
-                multiplier = if (o.has("multiplier")) o.optDouble("multiplier").toString() else "1",
-                offset = if (o.has("offset")) o.optDouble("offset").toString() else "0"
-            )
+            val item =
+                MiHomeItemState(
+                    deviceId = o.optString("deviceId"),
+                    showName = o.optString("showName"),
+                    template = o.optString("template", "{#1}")
+                )
+            val sourcesArr = o.optJSONArray("sources") ?: JSONArray()
+            for (si in 0 until sourcesArr.length()) {
+                val s = sourcesArr.optJSONObject(si) ?: continue
+                val valueType =
+                    try {
+                        MiHomeValueType.valueOf(s.optString("valueType", "NUMBER").uppercase())
+                    } catch (_: Exception) {
+                        MiHomeValueType.NUMBER
+                    }
+                item.sources.add(
+                    MiHomeSourceState(
+                        did = s.optString("did"),
+                        valueType = valueType,
+                        siid = if (s.has("siid")) s.optInt("siid").toString() else "",
+                        piid = if (s.has("piid")) s.optInt("piid").toString() else "",
+                        trueText = s.optString("trueText", "开启"),
+                        falseText = s.optString("falseText", "关闭"),
+                        invertBoolean = s.optBoolean("invertBoolean", false),
+                        unit = s.optString("unit", ""),
+                        decimals = if (s.has("decimals")) s.optInt("decimals").toString() else "1",
+                        multiplier = if (s.has("multiplier")) s.optDouble("multiplier").toString() else "1",
+                        offset = if (s.has("offset")) s.optDouble("offset").toString() else "0"
+                    )
+                )
+            }
+            if (item.sources.isEmpty()) item.sources.add(MiHomeSourceState())
+            item
         }
     } catch (_: Exception) {
         emptyList()
     }
 }
 
-private fun serializeMiHomeRows(rows: List<MiHomeRowState>): String {
+private fun serializeMiHomeItemsUI(items: List<MiHomeItemState>): String {
     val arr = JSONArray()
-    for (row in rows) {
-        if (row.did.isBlank() || row.deviceId.isBlank()) continue
+    for (item in items) {
+        if (item.deviceId.isBlank()) continue
+        val validSources = item.sources.filter { it.did.isNotBlank() }
+        if (validSources.isEmpty()) continue
+
         val o = JSONObject()
-        o.put("did", row.did.trim())
-        o.put("valueType", row.valueType.name)
-        row.siid.toIntOrNull()?.let { o.put("siid", it) }
-        row.piid.toIntOrNull()?.let { o.put("piid", it) }
-        o.put("deviceId", row.deviceId.trim())
-        o.put("showName", row.showName.trim().ifBlank { row.deviceId.trim() })
-        o.put("trueText", row.trueText)
-        o.put("falseText", row.falseText)
-        o.put("invertBoolean", row.invertBoolean)
-        o.put("unit", row.unit)
-        o.put("decimals", row.decimals.toIntOrNull() ?: 1)
-        o.put("multiplier", row.multiplier.toDoubleOrNull() ?: 1.0)
-        o.put("offset", row.offset.toDoubleOrNull() ?: 0.0)
-        o.put("offlineText", "离线")
+        o.put("deviceId", item.deviceId.trim())
+        o.put("showName", item.showName.trim().ifBlank { item.deviceId.trim() })
+        o.put("template", item.template.ifBlank { "{#1}" })
+
+        val sourcesArr = JSONArray()
+        for (src in validSources) {
+            val s = JSONObject()
+            s.put("did", src.did.trim())
+            s.put("valueType", src.valueType.name)
+            src.siid.toIntOrNull()?.let { s.put("siid", it) }
+            src.piid.toIntOrNull()?.let { s.put("piid", it) }
+            s.put("trueText", src.trueText)
+            s.put("falseText", src.falseText)
+            s.put("invertBoolean", src.invertBoolean)
+            s.put("unit", src.unit)
+            s.put("decimals", src.decimals.toIntOrNull() ?: 1)
+            s.put("multiplier", src.multiplier.toDoubleOrNull() ?: 1.0)
+            s.put("offset", src.offset.toDoubleOrNull() ?: 0.0)
+            s.put("offlineText", "离线")
+            sourcesArr.put(s)
+        }
+        o.put("sources", sourcesArr)
         arr.put(o)
     }
     return arr.toString()
