@@ -6,10 +6,12 @@ import java.security.SecureRandom
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 import kotlin.random.Random
+import okhttp3.Cookie
+import okhttp3.CookieJar
 import okhttp3.FormBody
+import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -36,33 +38,92 @@ class MiHomeCloudClient(
         private val region: String
 ) {
     private val TAG = "SleepyXposed-MiHome"
-    private val client =
-            OkHttpClient.Builder()
-                    .followRedirects(false) // we need the raw Location header in login step 2
-                    .build()
+
+    // Per-host cookie store. This matters a lot here: the 3-step login flow is a session — step1
+    // sets cookies that step2/step3 must send back, and the serviceToken step3 needs often only
+    // shows up after following a redirect chain. Without a CookieJar, OkHttp keeps NO cookies at
+    // all between requests, which silently breaks the whole flow even with a correct password.
+    private val cookieStore = HashMap<String, MutableMap<String, String>>()
+    private val cookieJar =
+            object : CookieJar {
+                override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
+                    val host = cookieStore.getOrPut(url.host) { mutableMapOf() }
+                    for (c in cookies) host[c.name] = c.value
+                }
+                override fun loadForRequest(url: HttpUrl): List<Cookie> {
+                    val host = cookieStore[url.host] ?: return emptyList()
+                    return host.map { (k, v) -> Cookie.Builder().name(k).value(v).domain(url.host).build() }
+                }
+            }
+    private val client = OkHttpClient.Builder().cookieJar(cookieJar).build()
 
     private var userId: String? = null
     private var serviceToken: String? = null
     private var ssecurity: String? = null
     private val deviceId: String = randomHex(16)
 
+    /** Human-readable reason the last [login] call failed, or null if it succeeded / hasn't run
+     * yet. Check this after `login()` returns false — logcat tag "SleepyXposed-MiHome" also has
+     * it, but this is meant to be shown directly in the UI. */
+    var lastError: String? = null
+        private set
+
     val isLoggedIn: Boolean
         get() = userId != null && serviceToken != null && ssecurity != null
 
-    /** Blocking. Returns true on success. */
+    /** Blocking. Returns true on success; see [lastError] for why it failed otherwise. */
     fun login(): Boolean {
+        lastError = null
         return try {
-            val step1 = loginStep1() ?: return false
-            val sign = step1.optString("_sign").takeIf { it.isNotBlank() } ?: return false
-            val step2 = loginStep2(sign) ?: return false
-            if (step2.optInt("code", -1) != 0) return false
-            val location = step2.optString("location").takeIf { it.isNotBlank() } ?: return false
-            ssecurity = step2.optString("ssecurity").takeIf { it.isNotBlank() } ?: return false
-            userId = step2.optString("userId").takeIf { it.isNotBlank() } ?: return false
+            val step1 = loginStep1()
+            if (step1 == null) {
+                lastError = "无法连接小米账号服务器（step1 请求失败或返回内容无法解析）"
+                return false
+            }
+            val sign = step1.optString("_sign").takeIf { it.isNotBlank() }
+            if (sign == null) {
+                lastError = "小米账号服务器返回的登录响应缺少 _sign 字段，接口可能已变化"
+                return false
+            }
+
+            val step2 = loginStep2(sign)
+            if (step2 == null) {
+                lastError = "无法连接小米账号服务器（step2 请求失败或返回内容无法解析）"
+                return false
+            }
+            val code = step2.optInt("code", -1)
+            if (code != 0) {
+                val desc = step2.optString("desc").ifBlank { "未知原因" }
+                val notificationUrl = step2.optString("notificationUrl")
+                lastError =
+                        if (notificationUrl.isNotBlank()) {
+                            "登录被小米风控拦截（需要短信验证码/滑块等二次验证，账密登录无法完成），" +
+                                    "需要先在浏览器里用同一账号正常登录一次再重试：$notificationUrl"
+                        } else {
+                            "登录被拒绝（code=$code，$desc）——多半是账号或密码不对，也可能是区域填错了"
+                        }
+                return false
+            }
+
+            val location = step2.optString("location").takeIf { it.isNotBlank() }
+            val ss = step2.optString("ssecurity").takeIf { it.isNotBlank() }
+            val uid = step2.optString("userId").takeIf { it.isNotBlank() }
+            if (location == null || ss == null || uid == null) {
+                lastError = "登录响应缺少 location/ssecurity/userId 字段，接口可能已变化"
+                return false
+            }
+            ssecurity = ss
+            userId = uid
+
             loginStep3(location)
-            isLoggedIn
+            if (serviceToken == null) {
+                lastError = "未能拿到 serviceToken（常见于二次验证没有走完，或 Cookie 会话丢失）"
+                return false
+            }
+            true
         } catch (e: Exception) {
-            android.util.Log.w(TAG, "login failed: ${e.message}")
+            lastError = "登录过程中发生异常：${e.message}"
+            android.util.Log.w(TAG, "login failed", e)
             false
         }
     }
@@ -103,8 +164,18 @@ class MiHomeCloudClient(
     }
 
     private fun loginStep3(location: String) {
+        // Let OkHttp follow the redirect chain (default) — the CookieJar captures Set-Cookie
+        // headers at every hop automatically, wherever serviceToken actually gets set.
         val req = Request.Builder().url(location).header("User-Agent", USER_AGENT).build()
-        client.newCall(req).execute().use { resp -> serviceToken = extractCookie(resp, "serviceToken") }
+        client.newCall(req).execute().use { /* body unused, we only care about cookies */ }
+        serviceToken = findCookie("serviceToken")
+    }
+
+    private fun findCookie(name: String): String? {
+        for ((_, cookies) in cookieStore) {
+            cookies[name]?.let { return it }
+        }
+        return null
     }
 
     /** Fetch the account's device list with basic online/offline + any legacy inline status. */
@@ -258,15 +329,6 @@ class MiHomeCloudClient(
         } catch (_: Exception) {
             null
         }
-    }
-
-    private fun extractCookie(resp: Response, name: String): String? {
-        for (header in resp.headers("Set-Cookie")) {
-            val kv = header.substringBefore(";")
-            val idx = kv.indexOf('=')
-            if (idx > 0 && kv.substring(0, idx) == name) return kv.substring(idx + 1)
-        }
-        return null
     }
 
     companion object {

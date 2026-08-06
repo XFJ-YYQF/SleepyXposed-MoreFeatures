@@ -360,27 +360,32 @@ fun ConfigScreen() {
                     miHomeFetchInProgress = true
                     miHomeFetchStatus = "正在登录并获取设备列表…"
                     scope.launch {
-                        val devices =
+                        val (devices, error) =
                             withContext(Dispatchers.IO) {
-                                runCatching {
-                                        val cloud =
-                                            MiHomeCloudClient(
-                                                miHomeUsername.trim(),
-                                                miHomePassword,
-                                                miHomeRegion.trim().ifBlank { "cn" }
-                                            )
-                                        if (!cloud.login()) return@runCatching null
-                                        cloud.fetchDeviceList()
-                                    }
-                                    .getOrNull()
+                                val cloud =
+                                    MiHomeCloudClient(
+                                        miHomeUsername.trim(),
+                                        miHomePassword,
+                                        miHomeRegion.trim().ifBlank { "cn" }
+                                    )
+                                val loggedIn = runCatching { cloud.login() }.getOrDefault(false)
+                                if (!loggedIn) {
+                                    null to (cloud.lastError ?: "未知错误")
+                                } else {
+                                    val devices = runCatching { cloud.fetchDeviceList() }.getOrNull()
+                                    if (devices == null) devices to "登录成功，但获取设备列表失败（网络异常）"
+                                    else devices to null
+                                }
                             }
                         miHomeFetchInProgress = false
                         if (devices == null) {
-                            miHomeFetchStatus = "登录失败，请检查账号/密码/区域"
+                            miHomeFetchStatus = "获取失败：$error"
                         } else {
                             miHomeFetchedDevices.clear()
                             miHomeFetchedDevices.addAll(devices)
-                            miHomeFetchStatus = "已获取 ${devices.size} 个设备，下面每条属性来源里可以直接选了"
+                            miHomeFetchStatus =
+                                if (error != null) "获取失败：$error"
+                                else "已获取 ${devices.size} 个设备，下面每条属性来源里可以直接选了"
                         }
                     }
                 },
