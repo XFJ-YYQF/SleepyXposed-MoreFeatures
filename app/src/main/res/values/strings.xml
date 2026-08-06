@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">SleepyXposed</string>
+    <string name="xposed_description">Monitor foreground app switches and report to Sleepy server</string>
+    <string name="config_description">Configure your Sleepy server connection. This Xposed module
+        will automatically report your device status and current app to the server.</string>
+    <string name="instructions">Instructions:\n1. Fill in your Sleepy server base URL (e.g.,
+        https://sleepy.example.com)\n2. Enter your server secret key\n3. Set a unique
+        device ID\n4. Choose a display name for this device\n5. Enable reporting with the switch\n6.
+        Save and reboot your device\n7. Enable this module in LSPosed/Xposed and select \'System
+        Framework\' as scope\n\nNote: The module only works when enabled in Xposed/LSPosed manager.</string>
+
+    <!-- Configuration UI strings -->
+    <string name="server_configuration">Server Configuration</string>
+    <string name="server_url_label">Server URL</string>
+    <string name="server_url_hint">https://sleepy.example.com</string>
+    <string name="server_secret_label">Server Secret</string>
+    <string name="server_secret_hint">Enter your secret key</string>
+    <string name="device_id_label">Device ID</string>
+    <string name="device_id_hint">e.g., android-phone-1</string>
+    <string name="display_name_label">Display Name</string>
+    <string name="display_name_hint">Name shown on Sleepy page</string>
+    <string name="enable_reporting">Enable Reporting</string>
+    <string name="save_configuration">Save Configuration</string>
+    <string name="instructions_title">Setup notes</string>
+    <string name="settings_title">Configuration</string>
+    <string name="tab_overview">Overview</string>
+    <string name="tab_config">Config</string>
+    <string name="more_info">More info</string>
+    <string name="less_info">Less info</string>
+    <string name="status_banner_enabled">Enabled</string>
+    <string name="status_banner_disabled">Not detected</string>
+    <string name="status_banner_version">Module version: %1$s-API%2$s(%3$d)</string>
+    <string name="info_xposed_framework">Xposed framework</string>
+    <string name="info_xposed_api">Xposed API version</string>
+    <string name="info_module_channel">Module channel</string>
+    <string name="info_package_name">Package name</string>
+    <string name="info_device">Device</string>
+    <string name="info_system_version">System version</string>
+    <string name="status_framework_unknown">Unknown / not detected</string>
+    <string name="status_loading">Loading status…</string>
+    <string name="status_module_hook_hint">Not detected recently. Make sure the module is enabled in LSPosed with \'System Framework\' scope, then reboot — status here updates automatically once the hook reports in.</string>
+    <string name="status_last_heartbeat">Last hook activity</string>
+    <string name="status_on">On</string>
+    <string name="status_off">Off</string>
+    <string name="status_ok">OK</string>
+    <string name="status_incomplete">Incomplete</string>
+    <string name="status_granted">Granted</string>
+    <string name="status_not_granted">Not granted</string>
+    <string name="status_missing_file">file missing</string>
+    <string name="status_reporting">App status reporting</string>
+    <string name="status_media_reporting">Media reporting</string>
+    <string name="status_media_method">Media method</string>
+    <string name="status_notification_listener">Notification access</string>
+    <string name="status_config_complete">Config completeness</string>
+    <string name="status_config_path">Config path</string>
+    <string name="status_rom">ROM / System UI</string>
+    <string name="config_saved">Configuration saved successfully!\n\nPlease reboot your device for
+        changes to take effect.</string>
+    <string name="fill_all_fields">Please fill in all fields</string>
+    <string name="config_saved_toast">Configuration saved</string>
+    <string name="config_save_failed">Failed to save configuration</string>
+    <string name="open_settings_failed">Failed to open settings: %1$s</string>
+
+    <!-- Media status reporting -->
+    <string name="media_listener_label">SleepyXposed Media Listener</string>
+    <string name="media_section_title">Media Status Reporting</string>
+    <string name="media_section_description">Optionally report the currently playing media (title
+        / artist) as a separate device on your Sleepy server.</string>
+    <string name="media_enable_reporting">Enable Media Reporting</string>
+    <string name="media_device_id_label">Media Device ID</string>
+    <string name="media_device_id_hint">e.g., phone-media</string>
+    <string name="media_show_name_label">Media Display Name</string>
+    <string name="media_show_name_hint">Name shown on Sleepy page for media status</string>
+    <string name="media_method_label">Acquisition Method</string>
+    <string name="media_method_auto">Auto (recommended based on device)</string>
+    <string name="media_method_system_hook">System Hook (via Xposed, no extra permission)</string>
+    <string name="media_method_notification_listener">Notification Listener (needs one-time
+        permission grant, best cross-ROM compatibility)</string>
+    <string name="media_method_dumpsys_shell">Dumpsys Shell (compatibility/debug fallback)</string>
+    <string name="media_recommendation_format">Detected: %1$s, %2$s\nRecommended method: %3$s\n%4$s</string>
+    <string name="media_grant_notification_access">Grant Notification Access (for Notification
+        Listener method)</string>
+    <string name="media_fill_required_fields">Please fill in the media device ID and display
+        name</string>
+
+    <!-- Mi Home cloud device status reporting -->
+    <string name="mihome_section_title">Mi Home Device Status Reporting</string>
+    <string name="mihome_section_description">Sign in with your Xiaomi cloud account and poll
+        device status (temperature/humidity, presence, switches) on a timer, each reported as its
+        own device. Does not hook the Mi Home app itself.</string>
+</resources>

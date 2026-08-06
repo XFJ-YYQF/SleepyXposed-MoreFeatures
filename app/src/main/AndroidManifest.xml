@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!-- Package-visibility declarations (targetSdk 30+) so RomDetector.hasPackage() can see
+         these ROM-identity packages via getPackageInfo. -->
+    <queries>
+        <package android:name="com.miui.securitycenter" />
+        <package android:name="com.coloros.safecenter" />
+        <package android:name="com.vivo.abe" />
+        <package android:name="com.huawei.systemmanager" />
+    </queries>
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:allowBackup="true"
+        android:hardwareAccelerated="true"
+        android:theme="@style/Theme.SleepyXposed">
+
+        <uses-library
+            android:name="de.robv.android.xposed"
+            android:required="false" />
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:theme="@style/Theme.SleepyXposed"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".MediaListenerService"
+            android:label="@string/media_listener_label"
+            android:exported="true"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
+        <service
+            android:name=".MiHomeMonitorService"
+            android:exported="false" />
+
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Exported so system_server (via the Xposed hook) can read config and record
+             heartbeats across processes. Access is enforced in-code: query() requires the
+             system UID or our own process, and heartbeat calls require system_server only. -->
+        <provider
+            android:name=".ConfigContentProvider"
+            android:authorities="io.github.recloudstudio.sleepyxposed.config"
+            android:exported="true"
+            android:enabled="true"
+            android:directBootAware="true"
+            android:grantUriPermissions="false" />
+
+        <meta-data
+            android:name="xposedmodule"
+            android:value="true" />
+        <meta-data
+            android:name="xposeddescription"
+            android:value="@string/xposed_description" />
+        <meta-data
+            android:name="xposedminversion"
+            android:value="93" />
+        <meta-data
+            android:name="xposedsharedprefs"
+            android:value="true" />
+        <meta-data
+            android:name="com.lsposed.module"
+            android:resource="@xml/lsposed_module" />
+        <meta-data
+            android:name="xposedscope"
+            android:value="android" />
+    </application>
+
+</manifest>
