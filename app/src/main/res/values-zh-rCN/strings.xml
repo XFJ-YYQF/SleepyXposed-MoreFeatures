@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-  <string name="app_name">SleepyXposed</string>
+  <string name="app_name">SleepyXposed+</string>
   <string name="xposed_description">监控前台应用切换并上报到 Sleepy 服务器</string>
   <string name="config_description">配置您的 Sleepy 服务器连接。此 Xposed 模块将自动向服务器报告您的设备状态和当前应用。</string>
   <string name="instructions">使用说明：\n1. 填写您的 Sleepy 服务器基础

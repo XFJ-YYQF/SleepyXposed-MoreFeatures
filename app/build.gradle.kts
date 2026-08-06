@@ -15,15 +15,15 @@ val keystoreProperties = Properties().apply {
 }
 
 android {
-    namespace = "io.github.recloudstudio.sleepyxposed"
+    namespace = "io.github.recloudstudio.sleepymore"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "io.github.recloudstudio.sleepyxposed"
+        applicationId = "io.github.recloudstudio.sleepymore"
         minSdk = 24
         targetSdk = 35
-        versionCode = 2
-        versionName = "2.0"
+        versionCode = 1
+        versionName = "1.0.0"
         buildConfigField("int", "XPOSED_API", "101")
         buildConfigField("String", "MODULE_CHANNEL", "\"release\"")
 

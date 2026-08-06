@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">SleepyXposed</string>
+    <string name="app_name">SleepyXposed+</string>
     <string name="xposed_description">Monitor foreground app switches and report to Sleepy server</string>
     <string name="config_description">Configure your Sleepy server connection. This Xposed module
         will automatically report your device status and current app to the server.</string>
